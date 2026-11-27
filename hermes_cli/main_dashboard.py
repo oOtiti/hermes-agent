@@ -17,6 +17,10 @@ from typing import NoReturn
 from hermes_cli.cli_output import line_input
 from hermes_cli.process_identity import is_desktop_owned_backend as _is_desktop_owned_backend
 from hermes_cli._startup_fast import project_root_str
+from hermes_cli._subprocess_compat import (
+    windows_detach_flags_without_breakaway,
+    windows_detach_popen_kwargs,
+)
 
 _PRE_BUILD_HINT = "  Pre-build first:  pnpm install --frozen-lockfile --filter web... && pnpm --dir web run build"
 
@@ -501,10 +505,20 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
             command = [*command, "--no-open"]
         try:
             with open(log_path, "ab") as log_f:
-                proc = subprocess.Popen(
-                    command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
-                    # detached-spawn: ok — dashboard service launch, meant to outlive the CLI that starts it
-                    start_new_session=True, close_fds=True)
+                try:
+                    proc = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                        # detached-spawn: ok — the restarted dashboard outlives the updater.
+                        close_fds=True, **windows_detach_popen_kwargs(),
+                    )
+                except OSError as exc:
+                    # A job that forbids breakaway still allows a windowless console.
+                    if getattr(exc, "winerror", None) != 5:
+                        raise
+                    proc = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                        close_fds=True, creationflags=windows_detach_flags_without_breakaway(),
+                    )
             spawned.append((original, command, proc))
         except (OSError, ValueError) as exc:
             failed.append((original, command, str(exc)))
